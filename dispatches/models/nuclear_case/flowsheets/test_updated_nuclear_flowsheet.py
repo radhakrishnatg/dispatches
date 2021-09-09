@@ -40,7 +40,7 @@ def test_model():
     nuclear_offtake = [3.0, 5.0, 10.0] #KW sent to PEM.
     h2_out_mol_per_s = [0.002, 0.003, 0.002]
 
-    ok, m = run_model(pem_bar=3, tank_len_m=0.3,  nuclear_offtake=nuclear_offtake, h2_out_mol_per_s=h2_out_mol_per_s, verbose=True, plotting=False)
+    ok, m = run_model(pem_bar=3, tank_len_m=0.3,  nuclear_offtake=nuclear_offtake, h2_out_mol_per_s=h2_out_mol_per_s, verbose=False, plotting=False)
     assert ok
 
 
@@ -53,7 +53,7 @@ def test_model_1():
     nuclear_offtake = [10e3, 10e3, 10e3] #KW sent to PEM.
     h2_out_mol_per_s = [10.0, 15.0, 20.0]
 
-    ok, m = run_model(pem_bar=3, tank_len_m=0.3,  nuclear_offtake=nuclear_offtake, h2_out_mol_per_s=h2_out_mol_per_s, verbose=True, plotting=False)
+    ok, m = run_model(pem_bar=3, tank_len_m=0.3,  nuclear_offtake=nuclear_offtake, h2_out_mol_per_s=h2_out_mol_per_s, verbose=False, plotting=False)
     assert ok
 
     assert value(m.fs.pem.electricity_in.electricity[0]) == 10e3

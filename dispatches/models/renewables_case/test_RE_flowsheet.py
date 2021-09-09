@@ -37,7 +37,7 @@ def test_model():
     h2_out_mol_per_s = [0.001, 0.003, 0.002]
 
     ok, m = run_model(wind_mw=20, pem_bar=3, batt_mw=10, tank_len_m=0.3,
-                      battery_discharge_kw=battery_discharge_kw, h2_out_mol_per_s=h2_out_mol_per_s, plotting=True)
+                      battery_discharge_kw=battery_discharge_kw, h2_out_mol_per_s=h2_out_mol_per_s, plotting=False)
     assert ok
 
     assert value(m.fs.windpower.electricity[0]) == pytest.approx(3.81, 1e-2)
@@ -55,7 +55,7 @@ def test_model_1():
     battery_discharge_kw = [-1.9051, 0, -3.81025]
     h2_out_mol_per_s = [0.001, 0.003, 0.002]
     ok, m = run_model(wind_mw=200, pem_bar=3, batt_mw=10, tank_len_m=0.3,
-                      battery_discharge_kw=battery_discharge_kw, h2_out_mol_per_s=h2_out_mol_per_s, plotting=True)
+                      battery_discharge_kw=battery_discharge_kw, h2_out_mol_per_s=h2_out_mol_per_s, plotting=False)
     assert ok
 
     assert value(m.fs.windpower.electricity[0]) == pytest.approx(38.1, 1e-2)
