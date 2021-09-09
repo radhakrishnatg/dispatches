@@ -21,12 +21,9 @@ from pyomo.common.config import ConfigBlock, ConfigValue, In
 from idaes.core import (Component,
                         ControlVolume0DBlock,
                         declare_process_block_class,
-                        EnergyBalanceType,
-                        MomentumBalanceType,
-                        MaterialBalanceType,
-                        UnitModelBlockData,
-                        useDefault)
-from idaes.core.util.config import list_of_floats
+                        UnitModelBlockData)
+from idaes.core.util import get_solver
+from idaes.core.util.initialization import solve_indexed_blocks
 import idaes.logger as idaeslog
 
 _log = idaeslog.getLogger(__name__)
@@ -109,22 +106,26 @@ class BatteryStorageData(UnitModelBlockData):
                         doc="Time step for converting between electricity power flows and stored energy",
                         units=pyunits.hr)
 
-        self.elec_in = Var(within=NonNegativeReals,
+        self.elec_in = Var(self.flowsheet().config.time,
+                           within=NonNegativeReals,
                            initialize=0.0,
                            doc="Energy in",
                            units=pyunits.kW)
 
-        self.elec_out = Var(within=NonNegativeReals,
+        self.elec_out = Var(self.flowsheet().config.time,
+                            within=NonNegativeReals,
                             initialize=0.0,
                             doc="Energy out",
                             units=pyunits.kW)
 
-        self.state_of_charge = Var(within=NonNegativeReals,
+        self.state_of_charge = Var(self.flowsheet().config.time,
+                                   within=NonNegativeReals,
                                    initialize=0.0,
                                    doc="State of charge (energy), [0, self.nameplate_energy]",
                                    units=pyunits.kWh)
 
-        self.energy_throughput = Var(within=NonNegativeReals,
+        self.energy_throughput = Var(self.flowsheet().config.time,
+                                     within=NonNegativeReals,
                                      initialize=0.0,
                                      doc="Cumulative energy throughput",
                                      units=pyunits.kWh)
@@ -136,24 +137,38 @@ class BatteryStorageData(UnitModelBlockData):
         self.power_out = Port(noruleinit=True, doc="A port for electricity outflow")
         self.power_out.add(self.elec_out, "electricity")
 
-        @self.Constraint()
-        def state_evolution(b):
-            return b.state_of_charge == b.initial_state_of_charge + (
-                    b.charging_eta * b.dt * b.elec_in
-                    - b.dt / b.discharging_eta * b.elec_out)
+        @self.Constraint(self.flowsheet().config.time)
+        def state_evolution(b, t):
+            return b.state_of_charge[t] == b.initial_state_of_charge + (
+                    b.charging_eta * b.dt * b.elec_in[t]
+                    - b.dt / b.discharging_eta * b.elec_out[t])
 
-        @self.Constraint()
-        def accumulate_energy_throughput(b):
-            return b.energy_throughput == b.initial_energy_throughput + b.dt * (b.elec_in + b.elec_out) / 2
+        @self.Constraint(self.flowsheet().config.time)
+        def accumulate_energy_throughput(b, t):
+            return b.energy_throughput[t] == b.initial_energy_throughput + b.dt * (b.elec_in[t] + b.elec_out[t]) / 2
 
-        @self.Constraint()
-        def state_of_charge_bounds(b):
-            return b.state_of_charge <= b.nameplate_energy - b.degradation_rate * b.energy_throughput
+        @self.Constraint(self.flowsheet().config.time)
+        def state_of_charge_bounds(b, t):
+            return b.state_of_charge[t] <= b.nameplate_energy - b.degradation_rate * b.energy_throughput[t]
 
-        @self.Constraint()
-        def power_bound_in(b):
-            return b.elec_in <= b.nameplate_power
+        @self.Constraint(self.flowsheet().config.time)
+        def power_bound_in(b, t):
+            return b.elec_in[t] <= b.nameplate_power
 
-        @self.Constraint()
-        def power_bound_out(b):
-            return b.elec_out <= b.nameplate_power
+        @self.Constraint(self.flowsheet().config.time)
+        def power_bound_out(b, t):
+            return b.elec_out[t] <= b.nameplate_power
+
+    def initialize(self, state_args={}, state_vars_fixed=False,
+                   hold_state=False, outlvl=idaeslog.NOTSET,
+                   temperature_bounds=(260, 616),
+                   solver=None, optarg=None):
+        init_log = idaeslog.getInitLogger(self.name, outlvl, tag="properties")
+        solve_log = idaeslog.getSolveLogger(self.name, outlvl,
+                                            tag="properties")
+        opt = get_solver(solver=solver, options=optarg)
+
+        with idaeslog.solver_log(solve_log, idaeslog.DEBUG) as slc:
+            res = solve_indexed_blocks(opt, [self], tee=slc.tee)
+        init_log.info("Battery initialization status {}.".
+                      format(idaeslog.condition(res)))
