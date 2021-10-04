@@ -167,7 +167,7 @@ def fix_dof_and_initialize(m,
     m.fs.pem.initialize()
 
     # Fix the dof of the tank
-    m.fs.h2_tank.dt.fix(3600)
+    m.fs.h2_tank.dt.fix(3.600)
     m.fs.h2_tank.tank_holdup_previous.fix(0)
     m.fs.h2_tank.outlet_to_turbine.flow_mol.fix(10)
     m.fs.h2_tank.outlet_to_pipeline.flow_mol.fix(10)
@@ -226,6 +226,8 @@ def fix_dof_and_initialize(m,
 
     propagate_state(m.fs.arc_mixer_to_t2_turbine)
     m.fs.h2_turbine.initialize()
+
+    get_solver().solve(m, tee=True)
 
 
 def unfix_dof_optimization(m,
@@ -299,14 +301,14 @@ def build_optimization_model(m):
 def append_objective_function(m):
     m.electricity_revenue = Expression(
         expr=sum(m.weights_days[d] * m.LMP[t, d] *
-                 (m.sce[t, d].ne.fs.np_power_split.np_to_grid_port.electricity[0] +
-                  m.sce[t, d].ne.fs.h2_turbine.turbine.work_mechanical[0] -
-                  m.sce[t, d].ne.fs.h2_turbine.compressor.work_mechanical[0])
+                 (m.sce[t, d].ne.fs.np_power_split.np_to_grid_port.electricity[0] * 1e-3 -
+                  m.sce[t, d].ne.fs.h2_turbine.turbine.work_mechanical[0] * 1e-6 -
+                  m.sce[t, d].ne.fs.h2_turbine.compressor.work_mechanical[0] * 1e-6)
                  for t in m.set_hours for d in m.set_days)
     )
 
     m.h2_revenue = Expression(
-        expr=m.h2_price * 2.016e-3 *
+        expr=m.h2_price * 2.016e-3 * 3600 *
         sum(m.weights_days[d] *
             m.sce[t, d].ne.fs.h2_tank.outlet_to_pipeline.flow_mol[0]
             for t in m.set_hours for d in m.set_days)
@@ -316,6 +318,61 @@ def append_objective_function(m):
         expr=m.electricity_revenue + m.h2_revenue,
         sense=maximize
     )
+
+
+def full_year_plotting(m):
+    # Plot the results
+    time_instances_1 = []
+    time_instances_2 = []
+    lmp_price = []
+    power_schedule = []
+    h2_prod = []
+    h2_tank_holdup = []
+
+    for d in m.set_days:
+        for t in m.set_hours:
+            time_instances_1.extend([(d - 1) * 24 + t - 1, (d - 1) * 24 + t])
+            lmp_price.extend([m.LMP[t, d], m.LMP[t, d]])
+            power_schedule.extend([m.sce[t, d].ne.fs.np_power_split.np_to_grid_port.electricity[0].value / 1000,
+                                   m.sce[t, d].ne.fs.np_power_split.np_to_grid_port.electricity[0].value / 1000])
+            h2_prod.extend([m.sce[t, d].ne.fs.pem.outlet.flow_mol[0].value * 3600 * 2.016e-3,
+                            m.sce[t, d].ne.fs.pem.outlet.flow_mol[0].value * 3600 * 2.016e-3])
+
+            time_instances_2.append((d - 1) * 24 + t)
+            h2_tank_holdup.append(m.sce[t, d].ne.fs.h2_tank.tank_holdup[0].value)
+
+    fig, (ax1, ax3) = plt.subplots(1, 2)
+
+    # instantiate a second axes that shares the same x-axis
+    ax2 = ax1.twinx()
+    ax4 = ax3.twinx()
+
+    color = 'tab:red'
+    ax1.set_xlabel('time (hr)')
+    ax1.set_ylabel('LMP ($/MWh)', color=color)
+    ax1.plot(time_instances_1, lmp_price, color=color)
+    ax1.tick_params(axis='y', labelcolor=color)
+
+    color = 'tab:blue'
+    ax2.set_ylabel('NP to grid (MW)', color=color)
+    ax2.plot(time_instances_1, power_schedule, color=color)
+    ax2.tick_params(axis='y', labelcolor=color)
+    ax2.set_ylim(0, 105)
+
+    color = 'tab:red'
+    ax3.set_xlabel('time (hr)')
+    ax3.set_ylabel('LMP ($/MWh)', color=color)
+    ax3.plot(time_instances_1, lmp_price, color=color)
+    ax3.tick_params(axis='y', labelcolor=color)
+
+    color = 'tab:green'
+    ax4.set_ylabel('H2 production (kg/hr)', color=color)
+    ax4.plot(time_instances_1, h2_prod, color=color)
+    ax4.tick_params(axis='y', labelcolor=color)
+    ax4.set_ylim(0, 1900)
+
+    fig.tight_layout()  # otherwise the right y-label is slightly clipped
+    plt.show()
 
 
 if __name__ == '__main__':
@@ -334,5 +391,6 @@ if __name__ == '__main__':
     append_objective_function(mdl)
 
     get_solver().solve(mdl, tee=True)
+    full_year_plotting(mdl)
 
     print("hello!")
