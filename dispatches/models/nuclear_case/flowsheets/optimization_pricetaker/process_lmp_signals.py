@@ -21,7 +21,7 @@ def append_lmp_signal(m,
                                    for i in range(364)])
 
     # m.set_days = RangeSet(lmp_data_full_year.shape[0])
-    num_days = 2
+    num_days = 364
     m.set_days = RangeSet(num_days)
     m.set_hours = RangeSet(24)
 
