@@ -26,7 +26,7 @@ import dispatches.models.nuclear_case.properties.h2_reaction \
     as h2_reaction_props
 
 
-def build_h2_turbine_model(h2_flow=0,
+def build_h2_turbine_model(h2_flow=((1 / 2.016) / 3.6),
                            air_h2_ratio=10.76,
                            h2_temperature=300,
                            h2_pressure=1.01325,

@@ -1,5 +1,6 @@
 # General python imports
 import matplotlib.pyplot as plt
+import time
 
 # Pyomo imports
 from pyomo.environ import (Constraint,
@@ -128,26 +129,32 @@ def build_optimization_model(m):
         return blk.sce[t, d].fs.h2_turbine_power <= blk.h2_turbine_capacity
 
     # H2 market
-    for t1 in m.set_hours:
-        for d1 in m.set_days:
-            m.sce[t1, d1].fs.h2_to_pipeline.fix(m.h2_market)
+    # for t1 in m.set_hours:
+    #     for d1 in m.set_days:
+    #         m.sce[t1, d1].fs.h2_to_pipeline.fix(m.h2_market)
+    @m.Constraint(m.set_hours, m.set_days)
+    def h2_demand_constraint(blk, t, d):
+        return blk.sce[t, d].fs.h2_to_pipeline <= m.h2_market
 
     return
 
 
-def append_costs_and_revenue(m, plant_life=30):
+def append_costs_and_revenue(m,
+                             plant_life=30,
+                             tax_rate=0.2,
+                             discount_rate=0.08):
     # Note: LHV of hydrogen is 33.3 kWh/kg
     m.capex = Expression(
-        expr=(1.63 * m.pem_capacity +
-              (29 * 33.3 * 1e-6) * m.tank_capacity +
-              0.947 * m.h2_turbine_capacity) / plant_life,
-        doc="Total capital cost (in million USD)"
+        expr=(1630000 * m.pem_capacity +
+              (29 * 33.3) * m.tank_capacity +
+              947000 * m.h2_turbine_capacity),
+        doc="Total capital cost (in USD)"
     )
 
     m.fixed_om_cost = Expression(
-        expr=(0.0479 * m.pem_capacity +
-              0.007 * m.h2_turbine_capacity),
-        doc="Fixed O&M Cost (in million USD)"
+        expr=(47900 * m.pem_capacity +
+              7000 * m.h2_turbine_capacity),
+        doc="Fixed O&M Cost (in USD)"
     )
 
     # Variable O&M: PEM: $1.3/MWh and turbine: $4.25/MWh
@@ -171,11 +178,22 @@ def append_costs_and_revenue(m, plant_life=30):
                  for t in m.set_hours for d in m.set_days)
     )
 
+    m.depreciation = Expression(expr=m.capex / plant_life)
+    m.net_profit = Expression(
+        expr=m.depreciation + (1 - tax_rate) * (+ m.h2_revenue
+                                                + m.electricity_revenue
+                                                - m.fixed_om_cost
+                                                - m.variable_om_cost
+                                                - m.depreciation)
+    )
+
+    # Factor for constant cash flow
+    m.constant_cf_factor = (1 - (1 + discount_rate) ** (- plant_life)) / discount_rate
+
 
 def append_objective_function(m):
-    m.net_revenue = Objective(
-        expr=m.electricity_revenue + m.h2_revenue - m.variable_om_cost
-             - 1e6 * (m.capex + m.fixed_om_cost),
+    m.npv = Objective(
+        expr=m.constant_cf_factor * m.net_profit - m.capex,
         sense=maximize
     )
 
@@ -285,6 +303,7 @@ def full_year_plotting(m):
 
 
 if __name__ == '__main__':
+    start = time.time()
     mdl = ConcreteModel()
     
     # Price of hydrogen: $2 per kg
@@ -310,10 +329,15 @@ if __name__ == '__main__':
 
     print("Revenue from electricity: $M ", mdl.electricity_revenue.expr() / 1e6)
     print("Revenue from hydrogen   : $M ", mdl.h2_revenue.expr() / 1e6)
-    print("Net revenue             : $M ", mdl.net_revenue.expr() / 1e6)
+    print("Net profit              : $M ", mdl.net_profit.expr() / 1e6)
+    print("Total capital cost      : $M ", mdl.capex.expr() / 1e6)
+    print("Net present value       : $M ", mdl.npv.expr() / 1e6)
+    print()
 
+    print("Minimum PEM Capacity    : ", 54.517 * 1e-3 * mdl.h2_market, " MW")
     print("PEM Capacity            : ", mdl.pem_capacity.value, " MW")
     print("Tank Capacity           : ", mdl.tank_capacity.value, " kg")
     print("H2 Turbine Capacity     : ", mdl.h2_turbine_capacity.value, " MW")
 
-    print("Hello!")
+    end = time.time()
+    print(f"Time taken for the run: {end - start} s")

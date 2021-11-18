@@ -332,13 +332,16 @@ def build_optimization_model(m, h2_demand):
     return
 
 
-def app_costs_and_revenue(m, plant_life=30):
+def app_costs_and_revenue(m,
+                          plant_life=30,
+                          tax_rate=0.2,
+                          discount_rate=0.08):
     # Note: LHV of hydrogen is 33.3 kWh/kg, pem_capacity is in kW,
     # tank_capacity is in moles, and turbine capacity is in W
     m.capex = Expression(
         expr=(1630 * m.pem_capacity +
               (29 * 33.3 * 2.016e-3) * m.tank_capacity +
-              (947 / 1000) * m.h2_turbine_capacity) / plant_life,
+              (947 / 1000) * m.h2_turbine_capacity),
         doc="Total capital cost (in USD)"
     )
 
@@ -373,11 +376,22 @@ def app_costs_and_revenue(m, plant_life=30):
                  for t in m.set_hours for d in m.set_days)
     )
 
+    m.depreciation = Expression(expr=m.capex / plant_life)
+    m.net_profit = Expression(
+        expr=m.depreciation + (1 - tax_rate) * (+ m.h2_revenue
+                                                + m.electricity_revenue
+                                                - m.fixed_om_cost
+                                                - m.variable_om_cost
+                                                - m.depreciation)
+    )
+
+    # Factor for constant cash flow
+    m.constant_cf_factor = (1 - (1 + discount_rate) ** (- plant_life)) / discount_rate
+
 
 def append_objective_function(m):
-    m.net_revenue = Objective(
-        expr=m.electricity_revenue + m.h2_revenue - m.variable_om_cost
-             - m.capex - m.fixed_om_cost,
+    m.npv = Objective(
+        expr=m.constant_cf_factor * m.net_profit - m.capex,
         sense=maximize
     )
 
