@@ -253,6 +253,130 @@ def append_objective_function(m):
     )
 
 
+def generate_plots(m, s, y, d):
+    """
+    This function generates plots for a given scenario (s),
+    year (y), and cluster (d)
+    """
+    # Plot the results
+    time_instances_1 = []
+    time_instances_2 = []
+    lmp_price = []
+    power_schedule = []
+    h2_prod = []
+    h2_tank_holdup = []
+    h2_turbine_power = []
+    h2_to_pipeline = []
+
+    for t in m.set_hours:
+        blk = m.scenarios[s].period[t, d, y].fs
+
+        time_instances_1.extend([t - 1, t])
+        lmp_price.extend([m.LMP[s][y][d][t], m.LMP[s][y][d][t]])
+        power_schedule.extend([blk.np_to_grid.value, blk.np_to_grid.value])
+        h2_prod.extend([blk.h2_production.value, blk.h2_production.value])
+
+        time_instances_2.append(t)
+        h2_tank_holdup.append(blk.tank_holdup.value)
+
+        h2_turbine_power.extend([blk.h2_turbine_power.value, blk.h2_turbine_power.value])
+        h2_to_pipeline.extend([blk.h2_to_pipeline.value, blk.h2_to_pipeline.value])
+
+    fig, ax = plt.subplots(2, 2)
+
+    # instantiate a second axes that shares the same x-axis
+    ax1 = ax[0, 0].twinx()
+    ax2 = ax[0, 1].twinx()
+    ax3 = ax[1, 0].twinx()
+    ax4 = ax[1, 1].twinx()
+
+    color = 'tab:red'
+    ax[0, 0].set_xlabel('time (hr)')
+    ax[0, 0].set_ylabel('LMP ($/MWh)', color=color)
+    ax[0, 0].plot(time_instances_1, lmp_price, color=color)
+    ax[0, 0].tick_params(axis='y', labelcolor=color)
+
+    color = 'tab:blue'
+    ax1.set_ylabel('NP to grid (MW)', color=color)
+    ax1.plot(time_instances_1, power_schedule, color=color)
+    ax1.tick_params(axis='y', labelcolor=color)
+    ax1.set_ylim(500, 1005)
+
+    color = 'tab:red'
+    ax[0, 1].set_xlabel('time (hr)')
+    ax[0, 1].set_ylabel('LMP ($/MWh)', color=color)
+    ax[0, 1].plot(time_instances_1, lmp_price, color=color)
+    ax[0, 1].tick_params(axis='y', labelcolor=color)
+
+    color = 'magenta'
+    ax2.set_ylabel('H2 to pipeline (kg/hr)', color=color)
+    ax2.plot(time_instances_1, h2_to_pipeline, color=color)
+    ax2.tick_params(axis='y', labelcolor=color)
+
+    color = 'tab:red'
+    ax[1, 0].set_xlabel('time (hr)')
+    ax[1, 0].set_ylabel('LMP ($/MWh)', color=color)
+    ax[1, 0].plot(time_instances_1, lmp_price, color=color)
+    ax[1, 0].tick_params(axis='y', labelcolor=color)
+
+    color = 'tab:green'
+    ax3.set_ylabel('H2 production (kg/hr)', color=color)
+    ax3.plot(time_instances_1, h2_prod, color=color)
+    ax3.tick_params(axis='y', labelcolor=color)
+    ax3.set_ylim(0, 8000)
+
+    color = 'tab:red'
+    ax[1, 1].set_xlabel('time (hr)')
+    ax[1, 1].set_ylabel('LMP ($/MWh)', color=color)
+    ax[1, 1].plot(time_instances_1, lmp_price, color=color)
+    ax[1, 1].tick_params(axis='y', labelcolor=color)
+
+    color = 'tab:cyan'
+    ax4.set_ylabel('H2 Turbine Power (MW)', color=color)
+    ax4.plot(time_instances_1, h2_turbine_power, color=color)
+    ax4.tick_params(axis='y', labelcolor=color)
+    ax4.set_ylim(-0.5, 10)
+
+    fig.tight_layout()  # otherwise the right y-label is slightly clipped
+    plt.show()
+
+    fig_1, ax_1 = plt.subplots()
+
+    # instantiate a second axes that shares the same x-axis
+    ax1_1 = ax_1.twinx()
+
+    color = 'tab:red'
+    ax_1.set_xlabel('time (hr)')
+    ax_1.set_ylabel('LMP ($/MWh)', color=color)
+    ax_1.plot(time_instances_1, lmp_price, color=color)
+    ax_1.tick_params(axis='y', labelcolor=color)
+
+    color = 'darkgoldenrod'
+    ax1_1.set_ylabel('Tank holdup (kg)', color=color)
+    ax1_1.plot(time_instances_2, h2_tank_holdup, color=color)
+    ax1_1.tick_params(axis='y', labelcolor=color)
+
+    fig_1.tight_layout()  # otherwise the right y-label is slightly clipped
+    plt.show()
+
+
+def write_results_to_file(m):
+    results = {s: {y: {d: {t: {"np_power": m.scenarios[s].period[t, d, y].fs.np_power.value,
+                               "np_to_electrolyzer": m.scenarios[s].period[t, d, y].np_to_electrolyzer.value,
+                               "h2_production": m.scenarios[s].period[t, d, y].h2_production.value,
+                               "tank_holdup": m.scenarios[s].period[t, d, y].tank_holdup.value,
+                               "h2_to_pipeline": m.scenarios[s].period[t, d, y].h2_to_pipeline.value,
+                               "h2_to_turbine": m.scenarios[s].period[t, d, y].h2_to_turbine.value,
+                               "h2_turbine_power": m.scenarios[s].period[t, d, y].h2_turbine_power.value}
+                           for t in m.set_hours}
+                       for d in m.set_days}
+                   for y in m.set_years}
+               for s in m.set_scenarios}
+
+    with open("stochastic_results.json", 'w') as fp:
+        json.dump(results, fp, indent=4)
+
+
 if __name__ == '__main__':
     start = time.time()
 
