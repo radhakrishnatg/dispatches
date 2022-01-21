@@ -152,8 +152,8 @@ def build_ne_flowsheet(pem_capacity,
         )
 
     if h2_demand is not None:
-        m.fs.h2_tank.outlet_to_pipeline.flow_mol.fix(h2_demand)
-        # m.fs.h2_tank.outlet_to_pipeline.flow_mol.setub(h2_demand)
+        # m.fs.h2_tank.outlet_to_pipeline.flow_mol.fix(h2_demand)
+        m.fs.h2_tank.outlet_to_pipeline.flow_mol.setub(h2_demand)
 
     return m
 
@@ -446,23 +446,167 @@ def append_objective_function(m):
         expr=sum(m.weights_scenarios[s] * m.scenarios[s].npv for s in m.set_scenarios),
         sense=maximize
     )
+    
+    
+def generate_plots(m, s, y, d):
+    """
+    This function generates plots for a given scenario (s),
+    year (y), and cluster (d)
+    """
+    # Plot the results
+    time_instances_1 = []
+    time_instances_2 = []
+    lmp_price = []
+    power_schedule = []
+    h2_prod = []
+    h2_tank_holdup = []
+    h2_turbine_power = []
+    h2_to_pipeline = []
+
+    for t in m.set_hours:
+        blk = m.scenarios[s].period[t, d, y].fs
+
+        time_instances_1.extend([t - 1, t])
+        lmp_price.extend([m.LMP[s][y][d][t], m.LMP[s][y][d][t]])
+        power_schedule.extend(
+            [blk.np_power_split.np_to_grid_port.electricity[0].value / 1000, 
+             blk.np_power_split.np_to_grid_port.electricity[0].value / 1000])
+        h2_prod.extend(
+            [blk.pem.outlet.flow_mol[0].value * 3600 * 2.016e-3,
+             blk.pem.outlet.flow_mol[0].value * 3600 * 2.016e-3])
+
+        time_instances_2.append(t)
+        h2_tank_holdup.append(blk.h2_tank.tank_holdup[0].value * 2.016e-3)
+
+        h2_turbine_power.extend([
+            - blk.h2_turbine.turbine.work_mechanical[0].value * 1e-6
+            - blk.h2_turbine.compressor.work_mechanical[0].value * 1e-6,
+            - blk.h2_turbine.turbine.work_mechanical[0].value * 1e-6
+            - blk.h2_turbine.compressor.work_mechanical[0].value * 1e-6])
+        h2_to_pipeline.extend(
+            [blk.h2_tank.outlet_to_pipeline.flow_mol[0].value * 3600 * 2.016e-3,
+             blk.h2_tank.outlet_to_pipeline.flow_mol[0].value * 3600 * 2.016e-3])
+
+    fig, ax = plt.subplots(2, 2)
+
+    # instantiate a second axes that shares the same x-axis
+    ax1 = ax[0, 0].twinx()
+    ax2 = ax[0, 1].twinx()
+    ax3 = ax[1, 0].twinx()
+    ax4 = ax[1, 1].twinx()
+
+    color = 'tab:red'
+    ax[0, 0].set_xlabel('time (hr)')
+    ax[0, 0].set_ylabel('LMP ($/MWh)', color=color)
+    ax[0, 0].plot(time_instances_1, lmp_price, color=color)
+    ax[0, 0].tick_params(axis='y', labelcolor=color)
+
+    color = 'tab:blue'
+    ax1.set_ylabel('NP to grid (MW)', color=color)
+    ax1.plot(time_instances_1, power_schedule, color=color)
+    ax1.tick_params(axis='y', labelcolor=color)
+    ax1.set_ylim(500, 1005)
+
+    color = 'tab:red'
+    ax[0, 1].set_xlabel('time (hr)')
+    ax[0, 1].set_ylabel('LMP ($/MWh)', color=color)
+    ax[0, 1].plot(time_instances_1, lmp_price, color=color)
+    ax[0, 1].tick_params(axis='y', labelcolor=color)
+
+    color = 'magenta'
+    ax2.set_ylabel('H2 to pipeline (kg/hr)', color=color)
+    ax2.plot(time_instances_1, h2_to_pipeline, color=color)
+    ax2.tick_params(axis='y', labelcolor=color)
+
+    color = 'tab:red'
+    ax[1, 0].set_xlabel('time (hr)')
+    ax[1, 0].set_ylabel('LMP ($/MWh)', color=color)
+    ax[1, 0].plot(time_instances_1, lmp_price, color=color)
+    ax[1, 0].tick_params(axis='y', labelcolor=color)
+
+    color = 'tab:green'
+    ax3.set_ylabel('H2 production (kg/hr)', color=color)
+    ax3.plot(time_instances_1, h2_prod, color=color)
+    ax3.tick_params(axis='y', labelcolor=color)
+    ax3.set_ylim(0, 8000)
+
+    color = 'tab:red'
+    ax[1, 1].set_xlabel('time (hr)')
+    ax[1, 1].set_ylabel('LMP ($/MWh)', color=color)
+    ax[1, 1].plot(time_instances_1, lmp_price, color=color)
+    ax[1, 1].tick_params(axis='y', labelcolor=color)
+
+    color = 'tab:cyan'
+    ax4.set_ylabel('H2 Turbine Power (MW)', color=color)
+    ax4.plot(time_instances_1, h2_turbine_power, color=color)
+    ax4.tick_params(axis='y', labelcolor=color)
+    ax4.set_ylim(-0.5, 10)
+
+    fig.tight_layout()  # otherwise the right y-label is slightly clipped
+    plt.show()
+
+    fig_1, ax_1 = plt.subplots()
+
+    # instantiate a second axes that shares the same x-axis
+    ax1_1 = ax_1.twinx()
+
+    color = 'tab:red'
+    ax_1.set_xlabel('time (hr)')
+    ax_1.set_ylabel('LMP ($/MWh)', color=color)
+    ax_1.plot(time_instances_1, lmp_price, color=color)
+    ax_1.tick_params(axis='y', labelcolor=color)
+
+    color = 'darkgoldenrod'
+    ax1_1.set_ylabel('Tank holdup (kg)', color=color)
+    ax1_1.plot(time_instances_2, h2_tank_holdup, color=color)
+    ax1_1.tick_params(axis='y', labelcolor=color)
+
+    fig_1.tight_layout()  # otherwise the right y-label is slightly clipped
+    plt.show()
 
 
-if __name__ == '__main__':
+def write_results_to_file(m, filename):
+    results = {s: {y: {d: {t: {}
+                           for t in m.set_hours}
+                       for d in m.set_days}
+                   for y in m.set_years}
+               for s in m.set_scenarios}
+    
+    for s in m.set_scenarios:
+        for y in m.set_years:
+            for d in m.set_days:
+                for t in m.set_hours:
+                    blk = m.scenarios[s].period[t, d, y].fs
+                    obj = results[s][y][d][t]
+                    
+                    obj["np_grid"] = blk.np_power_split.np_to_grid_port.electricity[0].value / 1000
+                    obj["np_to_electrolyzer"] = blk.pem.electricity[0].value / 1000
+                    obj["h2_production"] = blk.pem.outlet.flow_mol[0].value * 3600 * 2.016e-3
+                    obj["tank_holdup"] = blk.h2_tank.tank_holdup[0].value * 2.016e-3
+                    obj["h2_to_pipeline"] = blk.h2_tank.outlet_to_pipeline.flow_mol[0].value * 3600 * 2.016e-3
+                    obj["h2_to_turbine"] = blk.h2_tank.outlet_to_turbine.flow_mol[0].value * 3600 * 2.016e-3
+                    obj["h2_turbine_power"] = (-blk.h2_turbine.compressor.work_mechanical[0].value * 1e-6
+                                               - blk.h2_turbine.turbine.work_mechanical[0].value * 1e-6)
+                    
+    with open(filename, 'w') as fp:
+        json.dump(results, fp, indent=4)
+
+
+def build_and_solve_problem(h2_price, h2_demand):
     mdl = ConcreteModel()
 
     # Price of hydrogen: $2 per kg
-    mdl.h2_price = 2
+    mdl.h2_price = h2_price
 
     # Hydrogen demand (in kg/s)
-    mdl.h2_demand = 1 / 2.016e-3
+    mdl.h2_demand = h2_demand / 2.016e-3
 
     # Append LMP signal
     # append_lmp_signal(mdl,
     #                   signal_source="ARPA_E",
     #                   signal_name="MiNg_$100_CAISO")
     append_raven_lmp_signal(mdl,
-                            scenarios=[0, 1],
+                            scenarios=[0],
                             years=[2021],
                             plant_life=30,
                             discount_rate=0.08,
@@ -483,5 +627,30 @@ if __name__ == '__main__':
     print("PEM Capacity            : ", mdl.pem_capacity.value * 1e-3, " MW")
     print("Tank Capacity           : ", mdl.tank_capacity.value * 2.016e-3, " kg")
     print("H2 Turbine Capacity     : ", mdl.h2_turbine_capacity.value * 1e-6, " MW")
+    
+    for i in range(1, 21):
+        generate_plots(mdl, 0, 2021, i)
+    
+    write_results_to_file(mdl, "results_var_demand_" + str(h2_demand * 10) + "_price_" + str(h2_price) + ".json")
 
-    print("hello!")
+    return (mdl.expectation_npv.expr() / 1e6,  # NPV
+            mdl.pem_capacity.value * 1e-3,  # PEM Capacity
+            mdl.tank_capacity.value * 2.016e-3,  # Tank capacity
+            mdl.h2_turbine_capacity.value * 1e-6)  # Turbine capacity
+
+
+if __name__ == "__main__":
+    results = {}
+    for demand in [0.5, 1, 2]:
+        for price in [2, 4, 8]:
+            npv, pem, tank, turbine = build_and_solve_problem(h2_price=price,
+                                                              h2_demand=demand)
+
+            results[demand, price] = {"npv": npv,
+                                      "pem_capacity": pem,
+                                      "tank_capacity": tank,
+                                      "turbine_capacity": turbine}
+
+            with open("results_summary.json", 'w') as fp:
+                json.dump(results, fp, indent=4)
+
