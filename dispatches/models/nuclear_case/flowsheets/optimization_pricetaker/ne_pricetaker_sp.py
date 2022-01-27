@@ -2,6 +2,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import json
+from itertools import product
 
 # Pyomo imports
 from pyomo.environ import (Constraint,
@@ -12,9 +13,9 @@ from pyomo.environ import (Constraint,
                            NonNegativeReals,
                            TransformationFactory,
                            maximize,
-                           Block,
-                           Param)
+                           Block)
 from pyomo.network import Arc
+from pyomo.common.timing import TicTocTimer
 
 # IDAES imports
 from idaes.core import FlowsheetBlock
@@ -26,6 +27,7 @@ from idaes.core.util.initialization import propagate_state
 from idaes.generic_models.properties.core.generic.generic_property \
     import GenericParameterBlock
 from idaes.core.util.misc import get_solver
+from idaes.core.util import from_json, to_json
 
 # DISPATCHES imports
 from dispatches.models.nuclear_case.unit_models. \
@@ -44,12 +46,7 @@ from process_lmp_signals import append_lmp_signal, append_raven_lmp_signal
 from hydrogen_tank_simplified import SimpleHydrogenTank
 
 
-def build_ne_flowsheet(pem_capacity,
-                       tank_capacity,
-                       h2_turbine_capacity,
-                       h2_demand=None,
-                       air_h2_ratio=10.76):
-    m = ConcreteModel()
+def build_ne_flowsheet(m):
     m.fs = FlowsheetBlock(default={"dynamic": False})
 
     # Load thermodynamic and reaction packages
@@ -75,6 +72,19 @@ def build_ne_flowsheet(pem_capacity,
     m.fs.translator = Translator(default={
         "inlet_property_package": m.fs.h2ideal_props,
         "outlet_property_package": m.fs.h2turbine_props})
+
+    # Add translator block constraints
+    m.fs.translator.eq_flow_hydrogen = Constraint(
+        expr=m.fs.translator.inlet.flow_mol[0] ==
+             m.fs.translator.outlet.flow_mol[0])
+
+    m.fs.translator.eq_temperature = Constraint(
+        expr=m.fs.translator.inlet.temperature[0] ==
+             m.fs.translator.outlet.temperature[0])
+
+    m.fs.translator.eq_pressure = Constraint(
+        expr=m.fs.translator.inlet.pressure[0] ==
+             m.fs.translator.outlet.pressure[0])
 
     # Add mixer block
     # using minimize pressure for all inlets and outlet of the mixer
@@ -125,36 +135,6 @@ def build_ne_flowsheet(pem_capacity,
 
     TransformationFactory("network.expand_arcs").apply_to(m)
 
-    # Fix degrees of freedom and initialize
-    fix_dof_and_initialize(m)
-
-    # Unfix a few degrees of freedom for optimization
-    unfix_dof_optimization(m, air_h2_ratio=air_h2_ratio)
-
-    # Set lower bound on flows
-    set_lower_bound_on_flows(m)
-
-    # Add capacity constraints
-    @m.fs.Constraint(m.fs.time)
-    def pem_capacity_constraint(blk, t):
-        return blk.pem.electricity[t] <= pem_capacity
-
-    @m.fs.Constraint(m.fs.time)
-    def tank_capacity_constraint(blk, t):
-        return blk.h2_tank.tank_holdup[t] <= tank_capacity
-
-    @m.fs.Constraint(m.fs.time)
-    def turbine_capacity_constraint(blk, t):
-        return (
-            - blk.h2_turbine.turbine.work_mechanical[t]
-            - blk.h2_turbine.compressor.work_mechanical[t] <=
-            h2_turbine_capacity
-        )
-
-    if h2_demand is not None:
-        # m.fs.h2_tank.outlet_to_pipeline.flow_mol.fix(h2_demand)
-        m.fs.h2_tank.outlet_to_pipeline.flow_mol.setub(h2_demand)
-
     return m
 
 
@@ -191,21 +171,6 @@ def fix_dof_and_initialize(m,
     m.fs.h2_tank.initialize()
 
     # Fix the dof of the translator block
-    m.fs.translator.eq_flow_hydrogen = Constraint(
-        expr=m.fs.translator.inlet.flow_mol[0] ==
-             m.fs.translator.outlet.flow_mol[0]
-    )
-
-    m.fs.translator.eq_temperature = Constraint(
-        expr=m.fs.translator.inlet.temperature[0] ==
-             m.fs.translator.outlet.temperature[0]
-    )
-
-    m.fs.translator.eq_pressure = Constraint(
-        expr=m.fs.translator.inlet.pressure[0] ==
-             m.fs.translator.outlet.pressure[0]
-    )
-
     m.fs.translator.outlet.mole_frac_comp[0, "hydrogen"].fix(0.99)
     m.fs.translator.outlet.mole_frac_comp[0, "oxygen"].fix(0.01 / 4)
     m.fs.translator.outlet.mole_frac_comp[0, "argon"].fix(0.01 / 4)
@@ -241,7 +206,10 @@ def fix_dof_and_initialize(m,
     m.fs.h2_turbine.initialize()
 
     assert degrees_of_freedom(m) == 0
-    get_solver().solve(m, tee=True)
+    print("    Beginning to initialize the entire flowsheet")
+    res = get_solver().solve(m)
+    print("    Initialization of the entire flowsheet: ",
+          res.solver.termination_condition)
 
 
 def unfix_dof_optimization(m, air_h2_ratio):
@@ -278,15 +246,12 @@ def set_lower_bound_on_flows(m):
     m.fs.mixer.hydrogen_feed.flow_mol[0].setlb(0.001)
 
 
-def build_scenario_model(ps):
-    """
-    ps: Object containing the parameters and set information
-    """
+def build_scenario_model(m):
+    # ps: Object containing the parameters and set information
+    ps = m.parent_block()
     set_hours = ps.set_hours
     set_days = ps.set_days
     set_years = ps.set_years
-
-    m = ConcreteModel()
 
     # Declare first-stage variables (Design decisions)
     m.pem_capacity = Var(within=NonNegativeReals,
@@ -296,17 +261,24 @@ def build_scenario_model(ps):
     m.h2_turbine_capacity = Var(within=NonNegativeReals,
                                 doc="Maximum power output from the turbine (in W)")
 
-    m.period = Block(set_hours, set_days, set_years)
-    fs = build_ne_flowsheet(pem_capacity=m.pem_capacity,
-                            tank_capacity=m.tank_capacity,
-                            h2_turbine_capacity=m.h2_turbine_capacity,
-                            h2_demand=ps.h2_demand)
+    m.period = Block(set_hours, set_days, set_years,
+                     rule=build_ne_flowsheet)
 
-    for y1 in set_years:
-        for d1 in set_days:
-            print(f"Generating flowsheet model for year {y1}, day {d1}")
-            for t1 in set_hours:
-                m.period[t1, d1, y1].transfer_attributes_from(fs.clone())
+    @m.Constraint(set_hours, set_days, set_years)
+    def pem_capacity_constraint(blk, t, d, y):
+        return blk.period[t, d, y].fs.pem.electricity[0] <= m.pem_capacity
+
+    @m.Constraint(set_hours, set_days, set_years)
+    def tank_capacity_constraint(blk, t, d, y):
+        return blk.period[t, d, y].fs.h2_tank.tank_holdup[0] <= m.tank_capacity
+
+    @m.Constraint(set_hours, set_days, set_years)
+    def turbine_capacity_constraint(blk, t, d, y):
+        return (
+                - blk.period[t, d, y].fs.h2_turbine.turbine.work_mechanical[0]
+                - blk.period[t, d, y].fs.h2_turbine.compressor.work_mechanical[0] <=
+                m.h2_turbine_capacity
+        )
 
     @m.Constraint(set_hours, set_days, set_years)
     def tank_holdup_constraints(blk, t, d, y):
@@ -416,15 +388,11 @@ def build_stochastic_program(m):
     m.h2_turbine_capacity = Var(within=NonNegativeReals,
                                 doc="Maximum power output from the turbine (in W)")
 
-    # Build the model for one scenario
-    sce_model = build_scenario_model(m)
+    # Build the model for all scenarios
+    m.scenarios = Block(m.set_scenarios, rule=build_scenario_model)
     
-    # Clone the model for all the scenarios
-    m.scenarios = Block(m.set_scenarios)
+    # Append cash flows for each scenario
     for s1 in m.set_scenarios:
-        m.scenarios[s1].transfer_attributes_from(sce_model.clone())
-        
-        # Append cash flows for the scenario
         app_costs_and_revenue(m.scenarios[s1], m, scenario=s1)
 
     # Add non-anticipativity constraints
@@ -439,6 +407,28 @@ def build_stochastic_program(m):
     @m.Constraint(m.set_scenarios)
     def non_anticipativity_turbine(blk, s):
         return blk.h2_turbine_capacity == blk.scenarios[s].h2_turbine_capacity
+
+
+def initialize_model(m):
+    blk = ConcreteModel()
+    build_ne_flowsheet(blk)
+    fix_dof_and_initialize(blk)
+    to_json(blk, fname="ne_flowsheet_solution.json")
+
+    for s, y, d, t in product(m.set_scenarios, m.set_years, m.set_days, m.set_hours):
+        from_json(m.scenarios[s].period[t, d, y], fname="ne_flowsheet_solution.json")
+
+        # Unfix a few degrees of freedom for optimization
+        unfix_dof_optimization(m.scenarios[s].period[t, d, y], air_h2_ratio=10.76)
+
+        # Set non-zero lower bound on flows. Not needed if Ideal thermodynamic
+        # package is used. Adding it as a precautionary measure to avoid convergence issues
+        set_lower_bound_on_flows(m.scenarios[s].period[t, d, y])
+
+        # Set the demand constraint
+        if m.h2_demand is not None:
+            # m.scenarios[s].period[t, d, y].fs.h2_tank.outlet_to_pipeline.flow_mol.fix(m.h2_demand)
+            m.scenarios[s].period[t, d, y].fs.h2_tank.outlet_to_pipeline.flow_mol.setub(m.h2_demand)
 
 
 def append_objective_function(m):
@@ -613,12 +603,21 @@ def build_and_solve_problem(h2_price, h2_demand):
                             tax_rate=0.2)
 
     # Build the two-stage stochastic program
+    timer = TicTocTimer()
+    timer.tic("Starting to build the stochastic program!")
     build_stochastic_program(mdl)
+    timer.toc("Built the stochastic program")
+
+    # Initialize the model
+    initialize_model(mdl)
+    timer.toc("Initialized the model")
 
     # Append the objective function
     append_objective_function(mdl)
+    timer.toc("Appended the objective function")
 
     get_solver().solve(mdl, tee=True)
+    timer.toc("Solved the optimization problem")
 
     # print("Revenue from electricity: $M ", mdl.electricity_revenue.expr() / 1e6)
     # print("Revenue from hydrogen   : $M ", mdl.h2_revenue.expr() / 1e6)
@@ -628,10 +627,10 @@ def build_and_solve_problem(h2_price, h2_demand):
     print("Tank Capacity           : ", mdl.tank_capacity.value * 2.016e-3, " kg")
     print("H2 Turbine Capacity     : ", mdl.h2_turbine_capacity.value * 1e-6, " MW")
     
-    for i in range(1, 21):
-        generate_plots(mdl, 0, 2021, i)
-    
-    write_results_to_file(mdl, "results_var_demand_" + str(h2_demand * 10) + "_price_" + str(h2_price) + ".json")
+    # for i in range(1, 21):
+    #     generate_plots(mdl, 0, 2021, i)
+    #
+    # write_results_to_file(mdl, "results_var_demand_" + str(h2_demand * 10) + "_price_" + str(h2_price) + ".json")
 
     return (mdl.expectation_npv.expr() / 1e6,  # NPV
             mdl.pem_capacity.value * 1e-3,  # PEM Capacity
@@ -653,4 +652,5 @@ if __name__ == "__main__":
 
             with open("results_summary.json", 'w') as fp:
                 json.dump(results, fp, indent=4)
+
 

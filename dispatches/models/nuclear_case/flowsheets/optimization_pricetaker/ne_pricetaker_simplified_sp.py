@@ -13,6 +13,7 @@ from pyomo.environ import (Constraint,
                            Param,
                            maximize,
                            SolverFactory)
+from pyomo.common.timing import TicTocTimer
 
 # IDAES imports
 from idaes.core import FlowsheetBlock
@@ -82,15 +83,12 @@ def build_ne_flowsheet(m):
     return m
 
 
-def build_scenario_model(ps):
-    """
-    ps: Object containing the parameters and set information
-    """
+def build_scenario_model(m):
+    # ps: Object containing the parameters and set information
+    ps = m.parent_block()
     set_hours = ps.set_hours
     set_days = ps.set_days
     set_years = ps.set_years
-
-    m = ConcreteModel()
 
     # Declare first-stage variables
     m.pem_capacity = Var(within=NonNegativeReals,
@@ -221,15 +219,11 @@ def build_stochastic_program(m):
     m.h2_turbine_capacity = Var(within=NonNegativeReals,
                                 doc="Maximum power output from the turbine (in W)")
 
-    # Build the model for one scenario
-    sce_model = build_scenario_model(m)
+    # Build the model for all scenarios
+    m.scenarios = Block(m.set_scenarios, rule=build_scenario_model)
 
-    # Clone the model for all the scenarios
-    m.scenarios = Block(m.set_scenarios)
+    # Append cash flows for each scenario
     for s1 in m.set_scenarios:
-        m.scenarios[s1].transfer_attributes_from(sce_model.clone())
-
-        # Append cash flows for the scenario
         app_costs_and_revenue(m.scenarios[s1], m, scenario=s1)
 
     # Add non-anticipativity constraints
@@ -400,13 +394,18 @@ if __name__ == '__main__':
                             tax_rate=0.2)
 
     # Build the two-stage stochastic program
+    timer = TicTocTimer()
+    timer.tic("Starting to build the stochastic program!")
     build_stochastic_program(mdl)
+    timer.toc("Built the stochastic program")
 
     # Append the objective function
     append_objective_function(mdl)
+    timer.toc("Appended the objective function")
 
     solver = SolverFactory("gurobi")
     solver.solve(mdl, tee=True)
+    timer.toc("Solved the optimization problem")
 
     # full_year_plotting(mdl)
 
