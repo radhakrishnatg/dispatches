@@ -18,31 +18,36 @@ from pyomo.environ import (Var,
                            RangeSet,
                            Constraint,
                            NonNegativeReals,
-                           Reference,
                            TransformationFactory,
                            units as pyunits,
-                           sqrt)
+                           sqrt, log)
 from pyomo.common.config import ConfigValue, In
 from pyomo.network import Arc
 
 # IDAES imports
 from idaes.core import (declare_process_block_class,
                         UnitModelBlockData)
-from idaes.generic_models.unit_models import Heater
+from idaes.models.unit_models import Heater
 from idaes.core.util.config import is_physical_parameter_block
 from idaes.core.util.initialization import propagate_state
 from idaes.core.util.constants import Constants
 from idaes.core.util.model_statistics import degrees_of_freedom
-from idaes.core.util import get_solver
+from idaes.core.util import from_json, to_json, StoreSpec
+from idaes.core.solvers import get_solver
 import idaes.logger as idaeslog
 import idaes.core.util.scaling as iscale
 
-from dimensionless_numbers import u_tes
 from smooth_piecewise_linear import smooth_piecewise_linear
 from HT_surrogate import get_HT_surrogate_data
 
 # Set up logger
 _log = idaeslog.getLogger(__name__)
+
+
+def u_tes(r, k, a, b):
+    zz = r + ((a ** 3 * (4 * b ** 2 - a ** 2) + a * b ** 4 * (4 * log(b / a) - 3)) /
+              (4 * k * (b ** 2 - a ** 2) ** 2))
+    return 1 / zz
 
 
 @declare_process_block_class("ConcreteBlock")
@@ -119,12 +124,11 @@ class ConcreteBlockData(UnitModelBlockData):
             volume = b.face_area * b.delta_z
 
             return (
-                b.temperature[s] == b.init_temperature[s] +
-                (b.delta_time * b.q_fluid[s]) / (b.density * b.specific_heat * volume)
+                    b.temperature[s] == b.init_temperature[s] +
+                    (b.delta_time * b.q_fluid[s]) / (b.density * b.specific_heat * volume)
             )
 
     def initialize_build(self, state_args=None, outlvl=idaeslog.NOTSET, solver=None, optarg=None):
-
         init_log = idaeslog.getInitLogger(self.name, outlvl, tag="unit")
         solve_log = idaeslog.getSolveLogger(self.name, outlvl, tag="unit")
         solver = get_solver(solver=solver, options=optarg)
@@ -247,18 +251,10 @@ class TubeSideHexData(UnitModelBlockData):
                 setattr(self, "sc" + str(i), Arc(source=self.hex[i].outlet,
                                                  destination=self.hex[i + 1].inlet))
 
-            # Add Ports for inlet and outlet
-            self.inlet = Reference(self.hex[1].inlet)
-            self.outlet = Reference(self.hex[len(segments)].outlet)
-                
         elif op_mode == "discharge":
             for i in range(1, len(segments)):
                 setattr(self, "sc" + str(i), Arc(source=self.hex[i + 1].outlet,
                                                  destination=self.hex[i].inlet))
-
-            # Add Ports for inlet and outlet
-            self.inlet = Reference(self.hex[len(segments)].inlet)
-            self.outlet = Reference(self.hex[1].outlet)
 
         tube_units = self.config.property_package.get_metadata().get_derived_units
         # Add the additional variables and heat transfer constraint
@@ -289,7 +285,7 @@ class TubeSideHexData(UnitModelBlockData):
                                        initialize=500,
                                        doc="Temperature of the concrete block",
                                        units=tube_units("temperature"))
-            
+
             if self.config.use_surrogate:
                 obj.temperature_fluid = Var(domain=NonNegativeReals,
                                             bounds=(300, 900),
@@ -548,6 +544,110 @@ class ConcreteTESData(UnitModelBlockData):
 
             return m
 
+        # FIXME: Need to generalize these constraints. For now, assuming IAPWS
+        if operating_mode == "charge" or operating_mode == "combined":
+            self.charge_inlet = self.config.property_package.build_state_block(
+                self.flowsheet().time,
+                default={"defined_state": True,
+                         "has_phase_equilibrium": True})
+
+            self.charge_outlet = self.config.property_package.build_state_block(
+                self.flowsheet().time,
+                default={"defined_state": True,
+                         "has_phase_equilibrium": True})
+
+            @self.Constraint(self.flowsheet().time, self.time_periods)
+            def charge_inlet_flow_mol_equality(blk, t, p):
+                return (0.01 * blk.charge_inlet[t].flow_mol == 0.01 * blk.number_tubes *
+                        blk.period[p].tube_charge.hex[1].inlet.flow_mol[t])
+
+            @self.Constraint(self.flowsheet().time, self.time_periods)
+            def charge_inlet_enth_mol_equality(blk, t, p):
+                return (blk.charge_inlet[t].enth_mol ==
+                        blk.period[p].tube_charge.hex[1].inlet.enth_mol[t])
+
+            @self.Constraint(self.flowsheet().time, self.time_periods)
+            def charge_inlet_pressure_equality(blk, t, p):
+                return (blk.charge_inlet[t].pressure ==
+                        blk.period[p].tube_charge.hex[1].inlet.pressure[t])
+
+            p = data["time_periods"]
+            s = data["segments"]
+
+            @self.Constraint(self.flowsheet().time)
+            def charge_outlet_flow_mol_equality(blk, t):
+                return (0.01 * blk.charge_outlet[t].flow_mol == 0.01 * blk.number_tubes *
+                        blk.period[p].tube_charge.hex[s].outlet.flow_mol[t])
+
+            @self.Constraint(self.flowsheet().time)
+            def charge_outlet_enth_mol_equality(blk, t):
+                return (blk.charge_outlet[t].enth_mol ==
+                        blk.period[p].tube_charge.hex[s].outlet.enth_mol[t])
+
+            @self.Constraint(self.flowsheet().time)
+            def charge_outlet_pressure_equality(blk, t):
+                return (blk.charge_outlet[t].pressure ==
+                        blk.period[p].tube_charge.hex[s].outlet.pressure[t])
+
+            self.add_port(name="inlet_charge",
+                          block=self.charge_inlet,
+                          doc="Inlet of the tube on the charge side")
+            self.add_port(name="outlet_charge",
+                          block=self.charge_outlet,
+                          doc="Outlet of the tube on the charge side")
+
+        if operating_mode == "discharge" or operating_mode == "combined":
+            self.discharge_inlet = self.config.property_package.build_state_block(
+                self.flowsheet().time,
+                default={"defined_state": True,
+                         "has_phase_equilibrium": True})
+
+            self.discharge_outlet = self.config.property_package.build_state_block(
+                self.flowsheet().time,
+                default={"defined_state": True,
+                         "has_phase_equilibrium": True})
+
+            s = data["segments"]
+
+            @self.Constraint(self.flowsheet().time, self.time_periods)
+            def discharge_inlet_flow_mol_equality(blk, t, p):
+                return (0.01 * blk.discharge_inlet[t].flow_mol == 0.01 * blk.number_tubes *
+                        blk.period[p].tube_discharge.hex[s].inlet.flow_mol[t])
+
+            @self.Constraint(self.flowsheet().time, self.time_periods)
+            def discharge_inlet_enth_mol_equality(blk, t, p):
+                return (blk.discharge_inlet[t].enth_mol ==
+                        blk.period[p].tube_discharge.hex[s].inlet.enth_mol[t])
+
+            @self.Constraint(self.flowsheet().time, self.time_periods)
+            def discharge_inlet_pressure_equality(blk, t, p):
+                return (blk.discharge_inlet[t].pressure ==
+                        blk.period[p].tube_discharge.hex[s].inlet.pressure[t])
+
+            p = data["time_periods"]
+
+            @self.Constraint(self.flowsheet().time)
+            def discharge_outlet_flow_mol_equality(blk, t):
+                return (0.01 * blk.discharge_outlet[t].flow_mol == 0.01 * blk.number_tubes *
+                        blk.period[p].tube_discharge.hex[1].outlet.flow_mol[t])
+
+            @self.Constraint(self.flowsheet().time)
+            def discharge_outlet_enth_mol_equality(blk, t):
+                return (blk.discharge_outlet[t].enth_mol ==
+                        blk.period[p].tube_discharge.hex[1].outlet.enth_mol[t])
+
+            @self.Constraint(self.flowsheet().time)
+            def discharge_outlet_pressure_equality(blk, t):
+                return (blk.discharge_outlet[t].pressure ==
+                        blk.period[p].tube_discharge.hex[1].outlet.pressure[t])
+
+            self.add_port(name="inlet_discharge",
+                          block=self.discharge_inlet,
+                          doc="Inlet of the tube on the discharge side")
+            self.add_port(name="outlet_discharge",
+                          block=self.discharge_outlet,
+                          doc="Outlet of the tube on the discharge side")
+
         # Add constraints connecting different time periods
         @self.Constraint(self.time_periods, self.segments)
         def initial_temperature_constraints(blk, p, s):
@@ -624,6 +724,14 @@ class ConcreteTESData(UnitModelBlockData):
         init_log = idaeslog.getInitLogger(self.name, outlvl, tag="unit")
         solve_log = idaeslog.getSolveLogger(self.name, outlvl, tag="unit")
 
+        # Store original specification so initialization doesn't change the model
+        # This will only restore the values of variables that were originally fixed
+        sp = StoreSpec.value_isfixed_isactive(only_fixed=True)
+        state_charge = to_json(self.charge_inlet, return_dict=True, wts=sp)
+        state_discharge = to_json(self.discharge_inlet, return_dict=True, wts=sp)
+        self.inlet_charge.fix()
+        self.inlet_discharge.fix()
+
         operating_mode = self.config.operating_mode
         flags_charge = {}
         flags_discharge = {}
@@ -637,6 +745,21 @@ class ConcreteTESData(UnitModelBlockData):
             "bound_push": 1e-6,
             # "mu_init": 1e-5
         }
+
+        for p in self.time_periods:
+            if operating_mode == "charge" or operating_mode == "combined":
+                tube_inlet = self.period[p].tube_charge.hex[1].inlet
+                tube_inlet.flow_mol[0].value = (self.inlet_charge.flow_mol[0].value /
+                                                self.number_tubes.value)
+                tube_inlet.pressure[0].value = self.inlet_charge.pressure[0].value
+                tube_inlet.enth_mol[0].value = self.inlet_charge.enth_mol[0].value
+
+            if operating_mode == "discharge" or operating_mode == "combined":
+                tube_inlet = self.period[p].tube_discharge.hex[len(self.segments)].inlet
+                tube_inlet.flow_mol[0].value = (self.inlet_discharge.flow_mol[0].value /
+                                                self.number_tubes.value)
+                tube_inlet.pressure[0].value = self.inlet_discharge.pressure[0].value
+                tube_inlet.enth_mol[0].value = self.inlet_discharge.enth_mol[0].value
 
         for p in self.time_periods:
             # Fix the initial temperature for p > 1
@@ -712,19 +835,39 @@ class ConcreteTESData(UnitModelBlockData):
         # **************************************************
         #               INITIALIZING THE ENTIRE MODEL
         # **************************************************
-        assert degrees_of_freedom(self) == 0
-        with idaeslog.solver_log(solve_log, idaeslog.DEBUG) as slc:
-            res = solver.solve(self, tee=slc.tee)
+        p = len(self.time_periods)
 
-        init_log.info_high("Initialization TES: {}.".format(idaeslog.condition(res)))
-        init_log.info("Initialization Complete.")
+        if operating_mode == "charge" or operating_mode == "combined":
+            tube_outlet = self.period[p].tube_charge.hex[len(self.segments)].outlet
+            self.outlet_charge.flow_mol[0].value = \
+                (tube_outlet.flow_mol[0].value * self.number_tubes.value)
+            self.outlet_charge.pressure[0].value = tube_outlet.pressure[0].value
+            self.outlet_charge.enth_mol[0].value = tube_outlet.enth_mol[0].value
+
+        if operating_mode == "discharge" or operating_mode == "combined":
+            tube_outlet = self.period[p].tube_discharge.hex[1].outlet
+            self.outlet_discharge.flow_mol[0].value = \
+                (tube_outlet.flow_mol[0].value * self.number_tubes.value)
+            self.outlet_discharge.pressure[0].value = tube_outlet.pressure[0].value
+            self.outlet_discharge.enth_mol[0].value = tube_outlet.enth_mol[0].value
 
         for p in self.time_periods:
             if operating_mode == "charge" or operating_mode == "combined":
                 self.period[p].tube_charge.hex[1].control_volume.release_state(flags_charge[p])
 
             if operating_mode == "discharge" or operating_mode == "combined":
-                self.period[p].tube_discharge.hex[len(self.segments)].control_volume.release_state(flags_discharge[p])
+                self.period[p].tube_discharge.hex[len(self.segments)].control_volume. \
+                    release_state(flags_discharge[p])
+
+        assert degrees_of_freedom(self) == 0
+        with idaeslog.solver_log(solve_log, idaeslog.DEBUG) as slc:
+            res = solver.solve(self, tee=slc.tee)
+
+        from_json(self.charge_inlet, sd=state_charge, wts=sp)
+        from_json(self.discharge_inlet, sd=state_discharge, wts=sp)
+
+        init_log.info_high("Initialization TES: {}.".format(idaeslog.condition(res)))
+        init_log.info("Initialization Complete.")
 
     def set_default_scaling_factors(self):
         for p in self.time_periods:
@@ -737,6 +880,15 @@ class ConcreteTESData(UnitModelBlockData):
 
             # if p != 1:
             #     iscale.set_scaling_factor(concrete.init_temperature, 1e-2)
+
+            iscale.set_scaling_factor(
+                self.inlet_charge.flow_mol[0], 1)
+            iscale.set_scaling_factor(
+                self.inlet_discharge.flow_mol[0], 1)
+            iscale.set_scaling_factor(
+                self.outlet_charge.flow_mol[0], 1)
+            iscale.set_scaling_factor(
+                self.outlet_discharge.flow_mol[0], 1)
 
             for i in self.segments:
                 # Charge model

@@ -1,4 +1,5 @@
-__author__ = "Andres J Calderon, Naresh Susarla, Miguel Zamarripa, Jaffer Ghouse"
+__author__ = "Andres J Calderon, Naresh Susarla, Miguel Zamarripa, " \
+             "Jaffer Ghouse, Radhakrishna Tumbalam Gooty"
 
 import pandas as pd
 
@@ -55,16 +56,6 @@ conditions for main steam: Pressure (Pa), Temperature (K), and Flow (mol/s).
 The default values fixed in the model are from the NETL Baseline report rev4.
 
 """
-"""
-List of changes:
-Currently we are considering two possible locations for steam withdrawal:
-either directly from boiler or from reheater. In either case, the pressure of the 
-water at the outlet of the TES will be high enough to be put directly in 
-fwh_mix_7. Therefore, the bfp_mix model is not needed, so I'm removing the model
-to avoid confusion. In future, suppose we want to include the possibility to
-withdraw steam from turbine[4]. Even in this case, we do not need the bfp_mix model.
-We can put the water directly in Deaerator. 
-"""
 
 
 def build_scpc_flowsheet(m, include_concrete_tes=True):
@@ -77,6 +68,8 @@ def build_scpc_flowsheet(m, include_concrete_tes=True):
     # Add thermodynamic package.
     m.fs.prop_water_mix = iapws95.Iapws95ParameterBlock(
         default={"phase_presentation": iapws95.PhaseType.MIX})
+    m.fs.prop_water_mix.default_scaling_factor["pressure", None] = 1e-5
+    m.fs.prop_water_mix.default_scaling_factor["flow_mol", None] = 1e-2
 
     # Add sets to the model
     m.fs.set_turbines = RangeSet(9, doc="Set of turbines")
@@ -371,50 +364,19 @@ def append_tes_unit_models(m):
         "operating_mode": "combined",
         "use_surrogate": True})
 
-    # Connect the TES block with hp splitter and storage cooler
-    m.fs.tes_connections = ConstraintList()
-
-    # Molar flow, pressure and enthalpy at inlet
-    # Fixme: Use Arcs, and just modify the flow_mol constraint
-    for p in m.fs.tes.time_periods:
-        tube_inlet = m.fs.tes.period[p].tube_charge.hex[1].inlet
-        m.fs.tes_connections.add(
-            expr=m.fs.hp_splitter.outlet_2.flow_mol[0] ==
-                 data1['number_tubes'] * tube_inlet.flow_mol[0])
-        m.fs.tes_connections.add(
-            expr=m.fs.hp_splitter.outlet_2.pressure[0] == tube_inlet.pressure[0])
-        m.fs.tes_connections.add(
-            expr=m.fs.hp_splitter.outlet_2.enth_mol[0] == tube_inlet.enth_mol[0])
-
-    p = data1['time_periods']
-    tube_outlet = m.fs.tes.period[p].tube_charge.hex[data1["segments"]].outlet
-    m.fs.tes_connections.add(
-        expr=data1['number_tubes'] * tube_outlet.flow_mol[0] ==
-             m.fs.fwh_mix[7].from_storage.flow_mol[0])
-    m.fs.tes_connections.add(
-        expr=tube_outlet.pressure[0] == m.fs.fwh_mix[7].from_storage.pressure[0])
-    m.fs.tes_connections.add(
-        expr=tube_outlet.enth_mol[0] == m.fs.fwh_mix[7].from_storage.enth_mol[0])
+    m.fs.hp_splitter_to_tes = Arc(source=m.fs.hp_splitter.outlet_2,
+                                  destination=m.fs.tes.inlet_charge)
+    m.fs.tes_to_fwh_mix_7 = Arc(source=m.fs.tes.outlet_charge,
+                                destination=m.fs.fwh_mix[7].from_storage)
 
     # Connect the outlet_2 of bfp_splitter to the cold side of tes
     inlet_enthalpy_discharge = iapws95.htpx(T=355 * pyunits.K, P=8.5e5 * pyunits.Pa)
-    for p in m.fs.tes.time_periods:
-        tube_inlet = m.fs.tes.period[p].tube_discharge.hex[data1["segments"]].inlet
-        # m.fs.tes_connections.add(
-        #     expr=m.fs.bfp_splitter.outlet_2.flow_mol[0] ==
-        #          data1['number_tubes'] * tube_inlet.flow_mol[0])
-        # m.fs.tes_connections.add(
-        #     expr=m.fs.bfp_splitter.outlet_2.pressure[0] == tube_inlet.pressure[0])
-        # m.fs.tes_connections.add(
-        #     expr=m.fs.bfp_splitter.outlet_2.enth_mol[0] == tube_inlet.enth_mol[0])
+    m.fs.tes.inlet_discharge.pressure.fix(8.5e5)
+    m.fs.tes.inlet_discharge.enth_mol.fix(inlet_enthalpy_discharge)
 
-        tube_inlet.pressure.fix(8.5e5)
-        tube_inlet.enth_mol.fix(inlet_enthalpy_discharge)
-
-    @m.fs.Constraint(m.fs.tes.time_periods)
-    def discharge_flow_constraint(blk, p):
-        return (blk.tes.period[p].tube_discharge.hex[data1["segments"]].inlet.flow_mol[0] <=
-                0.1 * blk.bfp_splitter.inlet.flow_mol[0])
+    @m.fs.Constraint(m.fs.time)
+    def discharge_flow_constraint(blk, t):
+        return blk.tes.inlet_discharge.flow_mol[t] <= 0.2 * blk.bfp_splitter.inlet.flow_mol[t]
 
     m.fs.bfp_splitter.split_fraction[:, "outlet_2"].fix(0)
 
@@ -434,16 +396,8 @@ def append_tes_unit_models(m):
         # return blk.control_volume.properties_out[t].temperature == 310
         return blk.control_volume.properties_out[t].pressure == 6644
 
-    # Connect the outlet of tube_discharge to discharge_turbine
-    p = data1['time_periods']
-    tube_outlet = m.fs.tes.period[p].tube_discharge.hex[1].outlet
-    m.fs.tes_connections.add(
-        expr=data1['number_tubes'] * tube_outlet.flow_mol[0] ==
-             m.fs.discharge_turbine.inlet.flow_mol[0])
-    m.fs.tes_connections.add(
-        expr=tube_outlet.pressure[0] == m.fs.discharge_turbine.inlet.pressure[0])
-    m.fs.tes_connections.add(
-        expr=tube_outlet.enth_mol[0] == m.fs.discharge_turbine.inlet.enth_mol[0])
+    m.fs.tes_to_dis_turbine = Arc(source=m.fs.tes.outlet_discharge,
+                                  destination=m.fs.discharge_turbine.inlet)
 
     return
 
@@ -612,15 +566,15 @@ def fix_dof_and_initialize(m, outlvl=idaeslog.INFO_HIGH, operating_mode="charge"
     """
     if operating_mode == "charge":
         hp_split_fraction = 0.1
-        discharge_flow = 1e-5
+        discharge_flow = 1
 
     elif operating_mode == "discharge":
         hp_split_fraction = 1e-5
-        discharge_flow = 0.3
+        discharge_flow = 3000
 
     else:
         hp_split_fraction = 1e-5
-        discharge_flow = 1e-5
+        discharge_flow = 1
 
     main_steam_pressure = 24235081.4  # Pa
     boiler_inlet_flow_mol = 29111  # mol/s
@@ -851,39 +805,13 @@ def fix_dof_and_initialize(m, outlvl=idaeslog.INFO_HIGH, operating_mode="charge"
     m.fs.bfp_splitter.initialize(outlvl=outlvl, optarg=solver.options)
 
     # Initialize the TES system
-    # Todo: Need to model the problem such that we can use propagate_state
     if m.fs.include_concrete_tes:
-        for p in m.fs.tes.time_periods:
-            tube_inlet = m.fs.tes.period[p].tube_charge.hex[1].inlet
-            tube_inlet.flow_mol[0].value = (m.fs.hp_splitter.outlet_2.flow_mol[0].value /
-                                            m.fs.tes.config.model_data["number_tubes"])
-            tube_inlet.pressure[0].value = m.fs.hp_splitter.outlet_2.pressure[0].value
-            tube_inlet.enth_mol[0].value = m.fs.hp_splitter.outlet_2.enth_mol[0].value
-
-            tube_inlet = m.fs.tes.period[p].tube_discharge.hex[len(m.fs.tes.segments)].inlet
-            # tube_inlet.flow_mol[0].value = (m.fs.bfp_splitter.outlet_2.flow_mol[0].value /
-            #                                 m.fs.tes.config.model_data["number_tubes"])
-            # tube_inlet.pressure[0].value = m.fs.bfp_splitter.outlet_2.pressure[0].value
-            # tube_inlet.enth_mol[0].value = m.fs.bfp_splitter.outlet_2.enth_mol[0].value
-            tube_inlet.flow_mol[0].fix(discharge_flow)
-
+        propagate_state(m.fs.hp_splitter_to_tes)
+        m.fs.tes.inlet_discharge.flow_mol.fix(discharge_flow)
         m.fs.tes.initialize(outlvl=outlvl, optarg=solver.options)
 
-        # Initialize "from_storage" port
-        p = m.fs.tes.config.model_data['time_periods']
-        tube_outlet = m.fs.tes.period[p].tube_charge.hex[len(m.fs.tes.segments)].outlet
-        m.fs.fwh_mix[7].from_storage.flow_mol[0].value = \
-            (tube_outlet.flow_mol[0].value * m.fs.tes.config.model_data["number_tubes"])
-        m.fs.fwh_mix[7].from_storage.pressure[0].value = tube_outlet.pressure[0].value
-        m.fs.fwh_mix[7].from_storage.enth_mol[0].value = tube_outlet.enth_mol[0].value
-
-        # Initialize discharge turbine
-        p = m.fs.tes.config.model_data['time_periods']
-        tube_outlet = m.fs.tes.period[p].tube_discharge.hex[1].outlet
-        m.fs.discharge_turbine.inlet.flow_mol[0].value = \
-            (tube_outlet.flow_mol[0].value * m.fs.tes.config.model_data["number_tubes"])
-        m.fs.discharge_turbine.inlet.pressure[0].value = tube_outlet.pressure[0].value
-        m.fs.discharge_turbine.inlet.enth_mol[0].value = tube_outlet.enth_mol[0].value
+        propagate_state(m.fs.tes_to_fwh_mix_7)
+        propagate_state(m.fs.tes_to_dis_turbine)
         m.fs.discharge_turbine.initialize(outlvl=outlvl, optarg=solver.options)
 
     # Boiler feed pump
@@ -946,6 +874,18 @@ def fix_dof_and_initialize(m, outlvl=idaeslog.INFO_HIGH, operating_mode="charge"
 
     res = solver.solve(m, tee=solver_log)
     print("Model Initialization = ", res.solver.termination_condition)
+
+    # for i in m.fs.set_fwh:
+    #     obj = m.fs.fwh[i]
+    #     obj.delta_temperature_out_equation[0].set_value(
+    #         obj.delta_temperature_out[0] ==
+    #         obj.shell.properties_out[0].temperature_sat -
+    #         obj.tube.properties_in[0].temperature
+    #     )
+    #     iscale.constraint_scaling_transform(obj.delta_temperature_out_equation[0], 0.01)
+    #
+    # res = solver.solve(m, tee=solver_log)
+    # print("Model Initialization = ", res.solver.termination_condition)
     print("*********************Model Initialized**************************")
 
 
@@ -977,28 +917,81 @@ def set_scaling_factors(m):
     #     iscale.set_scaling_factor(m.fs.discharge_turbine.control_volume.work, 1)
 
     for i in m.fs.set_turbines:
-        iscale.set_scaling_factor(m.fs.turbine[i].control_volume.work, 1e-5)
+        iscale.set_scaling_factor(m.fs.turbine[i].control_volume.work, 1e-6)
 
-    iscale.set_scaling_factor(m.fs.bfpt.control_volume.work, 1e-5)
-    iscale.set_scaling_factor(m.fs.boiler.control_volume.heat, 1e-5)
-    iscale.set_scaling_factor(m.fs.reheater.control_volume.heat, 1e-5)
+    iscale.set_scaling_factor(m.fs.bfpt.control_volume.work, 1e-6)
+    iscale.set_scaling_factor(m.fs.boiler.control_volume.heat, 1e-7)
+    iscale.set_scaling_factor(m.fs.reheater.control_volume.heat, 1e-7)
 
     for i in m.fs.set_fwh:
-        iscale.set_scaling_factor(m.fs.fwh[i].area, 1)
-        iscale.set_scaling_factor(m.fs.fwh[i].overall_heat_transfer_coefficient, 1)
-        iscale.set_scaling_factor(m.fs.fwh[i].shell.heat, 1e-5)
-        iscale.set_scaling_factor(m.fs.fwh[i].tube.heat, 1e-5)
+        iscale.set_scaling_factor(m.fs.fwh[i].area, 1e-2)
+        iscale.set_scaling_factor(m.fs.fwh[i].overall_heat_transfer_coefficient, 1e-3)
+        iscale.set_scaling_factor(m.fs.fwh[i].shell.heat, 1e-7)
+        iscale.set_scaling_factor(m.fs.fwh[i].tube.heat, 1e-7)
 
-    iscale.set_scaling_factor(m.fs.condenser.shell.heat, 1e-5)
-    iscale.set_scaling_factor(m.fs.condenser.tube.heat, 1e-5)
-    iscale.set_scaling_factor(m.fs.cond_pump.control_volume.work, 1e-5)
-    iscale.set_scaling_factor(m.fs.bfp.control_volume.work, 1e-5)
+    iscale.set_scaling_factor(m.fs.condenser.shell.heat, 1e-7)
+    iscale.set_scaling_factor(m.fs.condenser.tube.heat, 1e-7)
+    iscale.set_scaling_factor(m.fs.cond_pump.control_volume.work, 1e-6)
+    iscale.set_scaling_factor(m.fs.bfp.control_volume.work, 1e-6)
+    iscale.set_scaling_factor(m.fs.net_power_output, 1e-6)
 
     if m.fs.include_concrete_tes:
         m.fs.tes.set_default_scaling_factors()
-        iscale.set_scaling_factor(m.fs.discharge_turbine.control_volume.work, 1)
+        iscale.set_scaling_factor(m.fs.discharge_turbine.control_volume.work, 1e-4)
 
     iscale.calculate_scaling_factors(m)
+
+    sf_enth_mol = m.fs.prop_water_mix.default_scaling_factor["enth_mol", None]
+    sf_pressure = m.fs.prop_water_mix.default_scaling_factor["pressure", None]
+
+    for i in m.fs.set_fwh:
+        iscale.constraint_scaling_transform(
+            m.fs.fwh[i].vapor_frac_constraint[0], sf_enth_mol)
+        iscale.constraint_scaling_transform(
+            m.fs.fwh[i].s1_pdrop_constraint[0], sf_pressure)
+        iscale.constraint_scaling_transform(
+            m.fs.fwh[i].s2_pdrop_constraint[0], sf_pressure)
+
+    for i in m.fs.set_fwh_mix:
+        iscale.constraint_scaling_transform(
+            m.fs.fwh_mix[i].mixer_pressure_constraint[0], sf_pressure)
+
+    iscale.constraint_scaling_transform(
+        m.fs.condenser_mix.mixer_pressure_constraint[0], sf_pressure)
+    iscale.constraint_scaling_transform(
+        m.fs.constraint_bfpt_out_pressure[0], sf_pressure)
+    iscale.constraint_scaling_transform(
+        m.fs.constraint_bfp_power[0], 1e-6)
+    iscale.constraint_scaling_transform(
+        m.fs.production_cons[0], 1e-6)
+
+    if m.fs.include_concrete_tes:
+        iscale.constraint_scaling_transform(
+            m.fs.discharge_turbine.turbine_enthalpy_constraint[0], sf_pressure)
+
+        for t, con in m.fs.tes.charge_inlet_enth_mol_equality.items():
+            iscale.constraint_scaling_transform(con, sf_enth_mol)
+
+        for t, con in m.fs.tes.charge_inlet_pressure_equality.items():
+            iscale.constraint_scaling_transform(con, sf_pressure)
+
+        for t, con in m.fs.tes.charge_outlet_enth_mol_equality.items():
+            iscale.constraint_scaling_transform(con, sf_enth_mol)
+
+        for t, con in m.fs.tes.charge_outlet_pressure_equality.items():
+            iscale.constraint_scaling_transform(con, sf_pressure)
+
+        for t, con in m.fs.tes.discharge_inlet_enth_mol_equality.items():
+            iscale.constraint_scaling_transform(con, sf_enth_mol)
+
+        for t, con in m.fs.tes.discharge_inlet_pressure_equality.items():
+            iscale.constraint_scaling_transform(con, sf_pressure)
+
+        for t, con in m.fs.tes.discharge_outlet_enth_mol_equality.items():
+            iscale.constraint_scaling_transform(con, sf_enth_mol)
+
+        for t, con in m.fs.tes.discharge_outlet_pressure_equality.items():
+            iscale.constraint_scaling_transform(con, sf_pressure)
 
 
 def unfix_dof_for_optimization(m):
@@ -1026,15 +1019,9 @@ def unfix_dof_for_optimization(m):
         # m.fs.bfp_splitter.split_fraction[:, "outlet_2"].setlb(1e-6)
         # m.fs.bfp_splitter.split_fraction[:, "outlet_2"].setub(0.05)
 
-        for p in m.fs.tes.time_periods:
-            m.fs.tes.period[p].tube_discharge.hex[20].inlet.flow_mol[0].unfix()
-            m.fs.tes.period[p].tube_discharge.hex[20].inlet.flow_mol.setlb(1e-5)
-            m.fs.tes.period[p].tube_discharge.hex[20].inlet.flow_mol.setub(0.6)
-
-        @m.fs.Constraint()
-        def equate_discharge_flow(blk):
-            return (blk.tes.period[1].tube_discharge.hex[20].inlet.flow_mol[0] ==
-                    blk.tes.period[2].tube_discharge.hex[20].inlet.flow_mol[0])
+        m.fs.tes.inlet_discharge.flow_mol.unfix()
+        m.fs.tes.inlet_discharge.flow_mol.setlb(1)
+        m.fs.tes.inlet_discharge.flow_mol.setub(6000)
 
         # Unfix the initial temperature profile of the concrete block
         # Bounds on temperatures are set in the unit model
@@ -1070,7 +1057,7 @@ def generate_stream_table(m):
 
 if __name__ == "__main__":
     mdl = ConcreteModel()
-    build_scpc_flowsheet(mdl, include_concrete_tes=False)
+    build_scpc_flowsheet(mdl, include_concrete_tes=True)
     set_scaling_factors(mdl)
     fix_dof_and_initialize(mdl)
 

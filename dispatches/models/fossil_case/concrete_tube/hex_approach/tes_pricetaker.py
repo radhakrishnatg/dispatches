@@ -107,7 +107,7 @@ def initialize_model(m):
     for d in m.set_days:
         for t in m.set_hours:
             if m.LMP[t, d] < 16.7:
-                m.period[t, d].fs.tes.period[1].tube_discharge.hex[20].inlet.flow_mol.fix(1e-5)
+                m.period[t, d].fs.tes.period[1].tube_discharge.hex[20].inlet.flow_mol.fix(1e-4)
     #         if m.LMP[t, d] > 16.7:
     #             m.period[t, d].fs.hp_splitter.split_fraction[:, "outlet_2"].fix(1e-5)
 
@@ -199,7 +199,7 @@ if __name__ == '__main__':
     append_objective_function(m)
 
     print("Degrees of freedom: ", degrees_of_freedom(m))
-    get_solver().solve(m, tee=True)
+    get_solver(options={"max_iter": 3000, "bound_push": 1e-6}).solve(m, tee=True)
 
     sol = {}
     for d in m.set_days:
