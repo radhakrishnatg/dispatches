@@ -37,6 +37,7 @@ from pyomo.environ import (
 from idaes.apps.grid_integration import MultiPeriodModel
 import idaes.logger as idaeslog
 from idaes.core.util.model_statistics import degrees_of_freedom
+from idaes.core.solvers import get_solver
 
 from dispatches.case_studies.nuclear_case.nuclear_flowsheet import (
     build_ne_flowsheet,
@@ -51,8 +52,7 @@ PEM_CAPEX = 400
 LIFETIME = 30
 
 NP_CAPACITY = 400               # Capacity of the nuclear power plant (in MW)
-H2_SELLING_PRICE = 1            # Selling price of hydrogen (in $/kg)
-H2_PROD_RATE = (1000 / 54.517)  # Hydrogen production rate (in kg/MW-h)
+H2_PROD_RATE = (1000 / 50)      # Hydrogen production rate (in kg/MW-h)
 NUM_REP_DAYS = 30               # Number of clusters/representative days
 
 NPP_FOM = 13.7  # Normalized FOM = (120,000 / 8760) = $13.7 per MWh
@@ -174,7 +174,7 @@ def unfix_dof(m):
     return
 
 
-def conceptual_design_dynamic_NE(num_rep_days, reserve=10, max_lmp=500, verbose=False,):
+def conceptual_design_dynamic_NE(num_rep_days, reserve=10, max_lmp=500, H2_SELLING_PRICE=2, verbose=False,):
     
     m = ConcreteModel(name='NE_conceptual_design_dynamic_surrogates')
 
@@ -304,7 +304,14 @@ def conceptual_design_dynamic_NE(num_rep_days, reserve=10, max_lmp=500, verbose=
 
     m.total_operating_cost = Expression(
         expr=sum(
-            m.weights[d] * 364 * m.mp_model.period[t, d].fs.operating_cost
+            m.weights[d] * 366 * m.mp_model.period[t, d].fs.operating_cost
+            for (t, d) in m.mp_model.set_period
+        )
+    )
+
+    m.total_hydrogen_revenue = Expression(
+        expr=sum(
+            m.weights[d] * 366 *m.mp_model.period[t, d].fs.h2_revenue
             for (t, d) in m.mp_model.set_period
         )
     )
@@ -316,3 +323,49 @@ def conceptual_design_dynamic_NE(num_rep_days, reserve=10, max_lmp=500, verbose=
     m.obj = Objective(expr = m.total_cost - m.electricity_revenue)
     
     return m
+
+
+if __name__ == '__main__':
+    h2_price = 1
+    mdl = conceptual_design_dynamic_NE(NUM_REP_DAYS + 2, reserve=10, max_lmp=500, H2_SELLING_PRICE=h2_price)
+
+    solver = get_solver()
+    solver.solve(mdl, tee=True)
+    # pem_cap = [i / 100 for i in range(5, 51, 5)]
+    pem_cap = [0.25]
+    elec_rev = []
+    h2_rev = []
+    net_npv = []
+
+    for p in pem_cap:
+        mdl.pem_capacity.fix(p * 400)
+
+        solver.solve(mdl)
+        elec_rev.append(mdl.electricity_revenue.value / 1e6)
+        h2_rev.append(mdl.total_hydrogen_revenue.expr() / 1e6)
+        net_npv.append(-mdl.obj.expr() / 1e6)
+
+    print("=" * 80)
+    print("H2 selling price: ", h2_price)
+    print("Annualized profit: ", -mdl.obj.expr() / 1e6)
+    print("Hydrogen revenue: ", mdl.total_hydrogen_revenue.expr() / 1e6)
+    print("Electricity revenue: ", mdl.electricity_revenue.value / 1e6)
+    print("PEM fraction: ", mdl.pem_capacity.value / 400)
+
+    # plt.plot(pem_cap, elec_rev)
+    # plt.xlabel("PEM Capacity Fraction")
+    # plt.ylabel("Electricity revenue")
+    # plt.title("H2 SP: $" + str(h2_price) + "Max LMP: " + str(1000))
+    # plt.show()
+    
+    # plt.plot(pem_cap, h2_rev)
+    # plt.xlabel("PEM Capacity Fraction")
+    # plt.ylabel("H2 revenue")
+    # plt.title("H2 SP: $" + str(h2_price) + "Max LMP: " + str(1000))
+    # plt.show()
+
+    # plt.plot(pem_cap, net_npv)
+    # plt.xlabel("PEM Capacity Fraction")
+    # plt.ylabel("NPV")
+    # plt.title("H2 SP: $" + str(h2_price) + "Max LMP: " + str(1000))
+    # plt.show()
